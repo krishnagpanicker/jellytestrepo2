@@ -268,6 +268,31 @@ app.post("/auth/google", async (req, res) => {
     }
 });
 
+app.get("/me", requireAuth, async (req, res) => {
+    try {
+        const result = await db.select({
+            id: users.id,
+            email: users.email,
+            name: users.name,
+        }).from(users).where(eq(users.id, req.user!.id)).limit(1);
+        const user = result[0];
+        console.log("Me:", user);
+
+        if (!user) {
+            return res.status(404).json({ error: 'User(you) not found.' });
+        }
+
+        return res.status(200).json({
+            id: user.id,
+            email: user.email,
+            name: user.name,
+        });
+    } catch (error) {
+        console.log(error);
+        return res.status(500).json({ error: 'You have not been retrieved.' });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`Server running on PORT ${PORT}`);
 });
