@@ -1,8 +1,12 @@
 import 'dotenv/config';
 import express, { type ErrorRequestHandler } from 'express';
 import cors from 'cors';
-import { sql } from 'drizzle-orm';
 import { db } from './db/index.js';
+import { users, auth_accounts, refresh_tokens } from './db/schema.js';
+import { eq, and, gt, lt, isNull, isNotNull, desc, asc, sql, inArray } from 'drizzle-orm';
+import type { Request, Response, NextFunction } from 'express';
+import { OAuth2Client } from 'google-auth-library';
+import { createAccessToken, verifyAccessToken, createRefreshToken, hashRefreshToken } from './tokens.js';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
@@ -10,12 +14,260 @@ const PORT = Number(process.env.PORT ?? 3000);
 app.use(cors());
 app.use(express.json());
 
+const googleClient = new OAuth2Client(process.env.GOOGLE_WEB_CLIENT_ID!);
+
+async function createAppSession(userId: string) {
+    const accessToken = await createAccessToken(userId);
+    const refreshToken = createRefreshToken();
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30);
+
+    await db.insert(refresh_tokens).values({
+        user_id: userId,
+        token_hash: hashRefreshToken(refreshToken),
+        expires_at: expiresAt,
+    });
+    return { accessToken, refreshToken };
+}
+
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Missing access token.' });
+    }
+
+    const accessToken = authHeader.slice(7).trim();
+
+    if (!accessToken || accessToken.split('.').length !== 3) {
+        return res.status(401).json({
+            error: 'Malformed access token. Expected a JWT with three dot-separated parts.',
+        });
+    }
+
+    try {
+        const userId = await verifyAccessToken(accessToken);
+        req.user = {
+            id: userId,
+        };
+        return next();
+    } catch (error) {
+        console.log(error);
+        return res.status(401).json({ error: 'Invalid or expired access token.' });
+    }
+}
+
 app.get('/health', (_req, res) => {
     res.json({
         status: 'ok',
     });
 });
 
+app.post("/auth/refresh", async (req, res) => {
+    const { refreshToken } = req.body as {
+        refreshToken?: string;
+    };
+
+    if (!refreshToken || typeof refreshToken !== "string") {
+        return res.status(400).json({ error: "Missing refresh token." });
+    }
+
+    const oldTokenHash = hashRefreshToken(refreshToken);
+
+    try {
+        const matchingTokens = await db
+        .select()
+        .from(refresh_tokens)
+        .where(
+            and(
+            eq(refresh_tokens.token_hash, oldTokenHash),
+            gt(refresh_tokens.expires_at, new Date()),
+            isNull(refresh_tokens.revoked_at)
+            )
+        )
+        .limit(1);
+
+        const oldToken = matchingTokens[0];
+
+        if (!oldToken) {
+        return res.status(401).json({ error: "Invalid refresh token." });
+        }
+
+        const userId = oldToken.user_id;
+
+        const newAccessToken = await createAccessToken(userId);
+        const newRefreshToken = createRefreshToken();
+
+        const newExpiresAt = new Date();
+        newExpiresAt.setDate(newExpiresAt.getDate() + 60);
+
+        const insertedRefreshTokens = await db
+            .insert(refresh_tokens)
+            .values({
+                user_id: userId,
+                token_hash: hashRefreshToken(newRefreshToken),
+                expires_at: newExpiresAt,
+            })
+            .returning();
+
+        const newTokenRow = insertedRefreshTokens[0];
+
+        await db
+            .update(refresh_tokens)
+            .set({
+                revoked_at: new Date(),
+                replaced_by: newTokenRow!.id,
+            })
+            .where(eq(refresh_tokens.id, oldToken.id));
+
+        await db
+            .delete(refresh_tokens)
+            .where(and(eq(refresh_tokens.user_id, userId), isNotNull(refresh_tokens.revoked_at), isNotNull(refresh_tokens.replaced_by), lt(refresh_tokens.revoked_at, sql`now() - interval '1 day'`)));
+        return res.status(200).json({
+            accessToken: newAccessToken,
+            refreshToken: newRefreshToken,
+        });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: "Refresh failed." });
+    }
+});
+
+app.post("/auth/logout", async (req, res) => {
+    const { refreshToken } = req.body as {
+        refreshToken?: string;
+    };
+
+    if (!refreshToken || typeof refreshToken !== "string") {
+        return res.status(400).json({ error: "Missing refresh token." });
+    }
+
+    try {
+        await db
+            .update(refresh_tokens)
+            .set({
+                revoked_at: new Date(),
+            })
+            .where(eq(refresh_tokens.token_hash, hashRefreshToken(refreshToken)));
+
+        return res.status(204).send();
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: "Logout failed." });
+    }
+});
+
+app.delete("/auth/delete", requireAuth, async (req, res) => {
+    const userId = req.user!.id;
+    try {
+        const result = await db.delete(users).where(eq(users.id, userId)).returning();
+        return res.status(200).json(result);
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: 'Account deletion failed.' });
+    }
+});
+
+app.post("/auth/google", async (req, res) => {
+    const { idToken } = req.body as { idToken?: string };
+    if (!idToken || typeof idToken !== 'string') {
+        return res.status(500).json({ error: 'Missing Google ID token aight?' });
+    }
+
+    try {
+        const ticket = await googleClient.verifyIdToken({
+            idToken,
+            audience: process.env.GOOGLE_WEB_CLIENT_ID!,
+        });
+        const payload = ticket.getPayload();
+        if (!payload?.sub) {
+            return res.status(401).json({ error: 'Google token missing subject bro' });
+        }
+        const provider = 'google';
+        const providerIssuer = 'https://accounts.google.com';
+        const providerSubject = payload.sub;
+        const email = payload.email ?? null;
+        const emailVerified = payload.email_verified ?? null;
+        const displayName = payload.name ?? null;
+        const picture = payload.picture ?? null;
+
+        const existingAuthAccounts = await db.select().from(auth_accounts).where(and(
+            eq(auth_accounts.provider, provider),
+            eq(auth_accounts.provider_issuer, providerIssuer),
+            eq(auth_accounts.provider_subject, providerSubject),
+        ));
+
+        let userId: string;
+        if (existingAuthAccounts[0]) {
+            userId = existingAuthAccounts[0].user_id;
+            const accessToken = await createAccessToken(userId);
+            const refreshToken = createRefreshToken();
+            const expiresAt = new Date();
+            expiresAt.setDate(expiresAt.getDate() + 30);
+
+            await db.insert(refresh_tokens).values({
+                user_id: userId,
+                token_hash: hashRefreshToken(refreshToken),
+                expires_at: expiresAt,
+            });
+            return res.status(200).json({
+                accessToken,
+                refreshToken,
+                user: {
+                    id: userId,
+                    email: existingAuthAccounts[0].email,
+                    displayName: existingAuthAccounts[0].display_name,
+                    picture: existingAuthAccounts[0].avatar_url,
+                    existing: true,
+                }
+            });
+        } else {
+            const insertedUsers = await db.insert(users).values({
+                email: email,
+                name: displayName,
+            }).returning();
+            const newUser = insertedUsers[0];
+            userId = newUser?.id!;
+            await db.insert(auth_accounts).values({
+                user_id: userId,
+                provider: provider,
+                provider_issuer: providerIssuer,
+                provider_subject: providerSubject,
+                email: email,
+                email_verified: emailVerified,
+                display_name: displayName,
+                avatar_url: picture,
+            });
+
+            const accessToken = await createAccessToken(userId);
+            const refreshToken = createRefreshToken();
+            const expiresAt = new Date();
+            expiresAt.setDate(expiresAt.getDate() + 30);
+
+            await db.insert(refresh_tokens).values({
+                user_id: userId,
+                token_hash: hashRefreshToken(refreshToken),
+                expires_at: expiresAt,
+            });
+            console.log('Access token:', accessToken);
+            console.log('Refresh token:', refreshToken);
+            return res.status(200).json({
+                accessToken,
+                refreshToken,
+                user: {
+                    id: userId,
+                    email,
+                    displayName,
+                    picture,
+                    existing: false,
+                }
+            });
+        }
+    } catch (error) {
+        console.log(error);
+        return res.status(500).json({ error: 'Google authentication failed lmao' });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`Server running on PORT ${PORT}`);
-})
+});

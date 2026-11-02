@@ -15,6 +15,20 @@
       "when": 1793482128672,
       "tag": "0001_massive_crystal",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793558384804,
+      "tag": "0002_absurd_captain_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793560164687,
+      "tag": "0003_tiny_boomer",
+      "breakpoints": true
     }
   ]
 }
