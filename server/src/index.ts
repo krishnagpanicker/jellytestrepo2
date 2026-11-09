@@ -2,11 +2,12 @@ import 'dotenv/config';
 import express, { type ErrorRequestHandler } from 'express';
 import cors from 'cors';
 import { db } from './db/index.js';
-import { users, auth_accounts, refresh_tokens } from './db/schema.js';
+import { users, auth_accounts, refresh_tokens, spotify_accounts } from './db/schema.js';
 import { eq, and, gt, lt, isNull, isNotNull, desc, asc, sql, inArray } from 'drizzle-orm';
 import type { Request, Response, NextFunction } from 'express';
 import { OAuth2Client } from 'google-auth-library';
 import { createAccessToken, verifyAccessToken, createRefreshToken, hashRefreshToken } from './tokens.js';
+import { exchangeSpotifyCode, encryptSpotifyToken } from './services/spotify.js';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
@@ -292,6 +293,74 @@ app.get("/me", requireAuth, async (req, res) => {
         return res.status(500).json({ error: 'You have not been retrieved.' });
     }
 });
+
+app.post('/spotify/connect', requireAuth, async (req, res) => {
+    const userId = req.user!.id;
+    try {
+        const { code, codeVerifier } = req.body ?? {};
+        if (typeof code !== 'string' || !code || typeof codeVerifier !== 'string' || !/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier)) {
+            return res.status(400).json({ error: 'Invalid Spotify authorization parameters.' });
+        }
+
+        const tokens = await exchangeSpotifyCode(code, codeVerifier);
+        if (!tokens.refresh_token) {
+            throw new Error('Spotify did not return a refresh token.');
+        }
+
+        const profileResponse = await fetch('https://api.spotify.com/v1/me', {
+            headers: {
+                Authorization: `Bearer ${tokens.access_token}`,
+            },
+        });
+
+        if (!profileResponse.ok) {
+            throw new Error(`Spotify profile request failed: ${profileResponse.status}`);
+        }
+
+        const profile = await profileResponse.json() as {
+            account_id?: string;
+            name?: string | null;
+        };
+
+        if (!profile.account_id) {
+            throw new Error('Spotify missing profile account ID.');
+        }
+
+        const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
+
+        const encryptedAccessToken = encryptSpotifyToken(tokens.access_token);
+        const encryptedRefreshToken = encryptSpotifyToken(tokens.refresh_token);
+
+        await db.insert(spotify_accounts).values({
+            id: userId,
+            spotify_id: profile.account_id,
+            name: profile.name ?? null,
+            access_token: encryptedAccessToken,
+            refresh_token: encryptedRefreshToken,
+            expires_at: expiresAt,
+        }).onConflictDoUpdate({
+            target: spotify_accounts.id,
+            set: {
+                spotify_id: profile.account_id,
+                name: profile.name ?? null,
+                access_token: encryptedAccessToken,
+                refresh_token: encryptedRefreshToken,
+                expires_at: expiresAt,
+            }
+        });
+
+        return res.status(200).json({
+            connected: true,
+            spotifyAccount: {
+                id: profile.account_id,
+                name: profile.name ?? null,
+            },
+        });
+    } catch (error) {
+        console.error('Spotify connection failed:', error);
+        return res.status(500).json({ error: 'Unable to connect to Spotify account.' });
+    }
+})
 
 app.listen(PORT, () => {
     console.log(`Server running on PORT ${PORT}`);

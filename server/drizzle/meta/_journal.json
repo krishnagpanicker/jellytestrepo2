@@ -29,6 +29,13 @@
       "when": 1793560164687,
       "tag": "0003_tiny_boomer",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793929791252,
+      "tag": "0004_cooing_katie_power",
+      "breakpoints": true
     }
   ]
 }

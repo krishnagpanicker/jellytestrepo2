@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { GoogleSignin } from '../../lib/googleAuth';
 import { saveSession, apiFetch, clearSession, getStoredRefreshToken } from '@/lib/apiClient';
+import { useSpotifyAuth } from '@/lib/spotifyAuth';
+import * as WebBrowser from 'expo-web-browser';
 
 type Stage = 'google' | 'spotify' | 'tester';
 
@@ -126,6 +128,7 @@ export default function HomeScreen() {
     const [initializing, setInitializing] = useState(true);
     const [accessToken, setAccessToken] = useState<string | null>(null);
     const [user, setUser] = useState<AuthUser | null>();
+    const { connectSpotifyAccount, ready } = useSpotifyAuth();
 
     useEffect(() => {
         let active = true;
@@ -144,6 +147,28 @@ export default function HomeScreen() {
         })();
         return () => { active = false; };
     }, []);
+
+    async function checkBrowser() {
+        const result =
+            await WebBrowser.getCustomTabsSupportingBrowsersAsync();
+
+        console.log("Custom Tabs support:", JSON.stringify(result, null, 2));
+    }
+
+    async function testBrowser() {
+        try {
+            const result = await WebBrowser.openBrowserAsync(
+                "https://accounts.spotify.com",
+                {
+                    browserPackage: "com.android.chrome",
+                }
+            );
+
+            console.log("Browser result:", result);
+        } catch (error) {
+            console.error("Browser test failed:", error);
+        }
+    }
 
     // TODO: Replace with actual Google authentication.
     async function connectGoogle() {
@@ -181,15 +206,14 @@ export default function HomeScreen() {
         setLoading(true);
 
         try {
-            // 1. Request Spotify authorization URL from backend
-            // 2. Open authorization URL in browser
-            // 3. Handle OAuth callback
-            // 4. Backend exchanges authorization code for tokens
-            // 5. Confirm Spotify account is connected
+            const connected = await connectSpotifyAccount();
 
-            setStage('tester');
+            if (connected) {
+                Alert.alert("Success", "Spotify account connected!");
+                setStage("tester");
+            }
         } catch (error) {
-            Alert.alert('Spotify connection failed', String(error));
+            Alert.alert("Spotify connection failed", String(error));
         } finally {
             setLoading(false);
         }
@@ -316,26 +340,30 @@ export default function HomeScreen() {
 
         {stage === 'spotify' && (
             <View style={styles.section}>
-            <Text style={styles.success}>
-                ✓ Google connected (demo)
-            </Text>
-
-            <Text style={styles.heading}>Connect Spotify</Text>
-
-            <Text style={styles.description}>
-                Authorize Jelly to access your Spotify account,
-                playback information, and queue.
-            </Text>
-
-            <TouchableOpacity
-                style={styles.spotifyButton}
-                onPress={connectSpotify}
-                disabled={loading}
-            >
-                <Text style={styles.spotifyButtonText}>
-                Connect Spotify
+                <Text style={styles.success}>
+                    ✓ Google connected (demo)
                 </Text>
-            </TouchableOpacity>
+                <TouchableOpacity onPress={testBrowser}>
+                    <Text style={{ color: "white" }}>
+                        Check Browser Support
+                    </Text>
+                </TouchableOpacity>
+                <Text style={styles.heading}>Connect Spotify</Text>
+
+                <Text style={styles.description}>
+                    Authorize Jelly to access your Spotify account,
+                    playback information, and queue.
+                </Text>
+
+                <TouchableOpacity
+                    style={styles.spotifyButton}
+                    onPress={connectSpotify}
+                    disabled={loading}
+                >
+                    <Text style={styles.spotifyButtonText}>
+                        Connect Spotify
+                    </Text>
+                </TouchableOpacity>
             </View>
         )}
 

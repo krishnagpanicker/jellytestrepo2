@@ -38,6 +38,25 @@ export const auth_accounts = pgTable('auth_accounts', {
     unique('provider_identity_unique').on(table.provider, table.provider_issuer, table.provider_subject),
 ]);
 
+export const spotify_accounts = pgTable('spotify_accounts', {
+    id: uuid('id').notNull(),
+    spotify_id: text('spotifyId').notNull(),
+    name: text('name'),
+    access_token: text('accessToken').notNull(),
+    refresh_token: text('refreshToken').notNull(),
+    expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+}, (table) => [
+    primaryKey({
+        name: 'spotify_user_pk',
+        columns: [table.id],
+    }),
+    foreignKey({
+        name: 'spotify_user_fk',
+        columns: [table.id],
+        foreignColumns: [users.id],
+    }).onDelete('cascade').onUpdate('cascade'),
+]);
+
 export const refresh_tokens = pgTable('refresh_tokens', {
     id: uuid('id').defaultRandom().notNull(),
     user_id: uuid('user_id').notNull(),
