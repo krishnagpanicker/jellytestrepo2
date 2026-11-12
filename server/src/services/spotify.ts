@@ -89,3 +89,31 @@ export function decryptSpotifyToken(encryptedToken: string): string {
         decipher.final(),
     ]).toString('utf8');
 }
+
+export async function refreshSpotifyAccessToken(refreshToken: string) {
+    const body = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: process.env.SPOTIFY_CLIENT_ID!,
+    });
+
+    const response = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+    });
+
+    if (!response.ok) {
+        const message = await response.text();
+        throw new Error(`Spotify refresh failed: (${response.status}): ${message}`);
+    }
+
+    return await response.json() as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in: number;
+        token_type: string;
+    };
+}

@@ -7,7 +7,7 @@ import { eq, and, gt, lt, isNull, isNotNull, desc, asc, sql, inArray } from 'dri
 import type { Request, Response, NextFunction } from 'express';
 import { OAuth2Client } from 'google-auth-library';
 import { createAccessToken, verifyAccessToken, createRefreshToken, hashRefreshToken } from './tokens.js';
-import { exchangeSpotifyCode, encryptSpotifyToken } from './services/spotify.js';
+import { exchangeSpotifyCode, encryptSpotifyToken, decryptSpotifyToken, refreshSpotifyAccessToken } from './services/spotify.js';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
@@ -29,6 +29,29 @@ async function createAppSession(userId: string) {
         expires_at: expiresAt,
     });
     return { accessToken, refreshToken };
+}
+
+async function getSpotifyAccessToken(userId: string): Promise<string> {
+    const [account] = await db.select().from(spotify_accounts).where(eq(spotify_accounts.id, userId)).limit(1);
+    if (!account) {
+        throw new Error('SPOTIFY_NOT_CONNECTED');
+    }
+
+    if (account.expires_at.getTime() > Date.now() + 60_000) {
+        return decryptSpotifyToken(account.access_token);
+    }
+
+    const refreshToken = decryptSpotifyToken(account.refresh_token);
+
+    const newTokens = await refreshSpotifyAccessToken(refreshToken);
+
+    await db.update(spotify_accounts).set({
+        access_token: encryptSpotifyToken(newTokens.access_token),
+        refresh_token: newTokens.refresh_token ? encryptSpotifyToken(newTokens.refresh_token) : account.refresh_token,
+        expires_at: new Date(Date.now() + newTokens.expires_in * 1000),
+    }).where(eq(spotify_accounts.id, userId));
+
+    return newTokens.access_token;
 }
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
@@ -319,12 +342,14 @@ app.post('/spotify/connect', requireAuth, async (req, res) => {
 
         const profile = await profileResponse.json() as {
             account_id?: string;
-            name?: string | null;
+            display_name?: string | null;
         };
 
         if (!profile.account_id) {
             throw new Error('Spotify missing profile account ID.');
         }
+
+        console.log('Spotify profile:', profile);
 
         const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
 
@@ -334,7 +359,7 @@ app.post('/spotify/connect', requireAuth, async (req, res) => {
         await db.insert(spotify_accounts).values({
             id: userId,
             spotify_id: profile.account_id,
-            name: profile.name ?? null,
+            name: profile.display_name ?? null,
             access_token: encryptedAccessToken,
             refresh_token: encryptedRefreshToken,
             expires_at: expiresAt,
@@ -342,7 +367,7 @@ app.post('/spotify/connect', requireAuth, async (req, res) => {
             target: spotify_accounts.id,
             set: {
                 spotify_id: profile.account_id,
-                name: profile.name ?? null,
+                name: profile.display_name ?? null,
                 access_token: encryptedAccessToken,
                 refresh_token: encryptedRefreshToken,
                 expires_at: expiresAt,
@@ -353,14 +378,71 @@ app.post('/spotify/connect', requireAuth, async (req, res) => {
             connected: true,
             spotifyAccount: {
                 id: profile.account_id,
-                name: profile.name ?? null,
+                name: profile.display_name ?? null,
             },
         });
     } catch (error) {
         console.error('Spotify connection failed:', error);
         return res.status(500).json({ error: 'Unable to connect to Spotify account.' });
     }
-})
+});
+
+app.get('/spotify/devices', requireAuth, async (req, res) => {
+    const userId = req.user!.id;
+
+    try {
+        const spotifyAccessToken = await getSpotifyAccessToken(userId);
+        const response = await fetch('https://api.spotify.com/v1/me/player/devices', {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${spotifyAccessToken}`,
+            },
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Spotify devices request failed:', response.status, errorText);
+            return res.status(response.status).json({ error: 'Failed to retrieve Spotify devices.', spotifyStatus: response.status });
+        }
+
+        const data = await response.json() as {
+            devices: Array<{
+                id: string | null;
+                name: string;
+                type: string;
+                is_active: boolean;
+                is_restricted: boolean;
+                volume_percent: number | null;
+            }>;
+        }
+
+        console.log('Devices:', data.devices);
+
+        return res.status(200).json({ devices: data.devices ?? [], });
+    } catch (error) {
+        console.error('Error retrieving Spotify devices:', error);
+
+        if (error instanceof Error && error.message === 'SPOTIFY_NOT_CONNECTED') {
+            return res.status(409).json({ error: 'Spotify account is not connected.' });
+        }
+
+        return res.status(500).json({ error: 'Unable to retrieve Spotify devices.' });
+    }
+});
+
+app.get('/spotify/status', requireAuth, async (req, res) => {
+    try {
+        const [account] = await db.select({
+            spotifyId: spotify_accounts.spotify_id,
+            name: spotify_accounts.name,
+        }).from(spotify_accounts).where(eq(spotify_accounts.id, req.user!.id)).limit(1);
+
+        return res.status(200).json({ connected: !!account, account: account ?? null, });
+    } catch (error) {
+        console.error('Spotify status error:', error);
+        return res.status(500).json({ error: 'Unable to check Spotify connection.' });
+    }
+});
 
 app.listen(PORT, () => {
     console.log(`Server running on PORT ${PORT}`);

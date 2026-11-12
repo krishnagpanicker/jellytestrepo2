@@ -12,6 +12,7 @@ import { GoogleSignin } from '../../lib/googleAuth';
 import { saveSession, apiFetch, clearSession, getStoredRefreshToken } from '@/lib/apiClient';
 import { useSpotifyAuth } from '@/lib/spotifyAuth';
 import * as WebBrowser from 'expo-web-browser';
+import SpotifyDevices from '@/components/SpotifyDevices';
 
 type Stage = 'google' | 'spotify' | 'tester';
 
@@ -20,6 +21,15 @@ type AuthUser = {
     email: string | null;
     name: string | null;
 };
+
+type SpotifyDevice = {
+    id: string | null;
+    name: string;
+    type: string;
+    is_active: boolean;
+    is_restricted: boolean;
+    volume_percent: number | null;
+}
 
 const API_BASE_URL = 'http://10.0.2.2:3000';
 
@@ -128,6 +138,7 @@ export default function HomeScreen() {
     const [initializing, setInitializing] = useState(true);
     const [accessToken, setAccessToken] = useState<string | null>(null);
     const [user, setUser] = useState<AuthUser | null>();
+    const [spotifyConnected, setSpotifyConnected] = useState(false);
     const { connectSpotifyAccount, ready } = useSpotifyAuth();
 
     useEffect(() => {
@@ -147,6 +158,47 @@ export default function HomeScreen() {
         })();
         return () => { active = false; };
     }, []);
+
+
+    useEffect(() => {
+        let active = true;
+
+        if (!user) {
+            setSpotifyConnected(false);
+            return;
+        }
+
+        async function checkSpotifyConnection() {
+            try {
+                const response = await apiFetch("/spotify/status");
+
+                if (!response.ok) {
+                    throw new Error(
+                        `Spotify status request failed: ${response.status}`
+                    );
+                }
+
+                const data = await response.json();
+
+                if (active) {
+                    setSpotifyConnected(data.connected === true);
+                }
+            } catch (error) {
+                console.error("Spotify connection status:", error);
+
+                if (active) {
+                    setSpotifyConnected(false);
+                }
+            }
+        }
+
+        checkSpotifyConnection();
+
+        return () => {
+            active = false;
+        };
+    }, [user]);
+
 
     async function checkBrowser() {
         const result =
@@ -189,6 +241,7 @@ export default function HomeScreen() {
 
     async function handleLogout() {
         setLoading(true);
+        setSpotifyConnected(false);
         try {
             await logout();
             setUser(null);
@@ -209,6 +262,7 @@ export default function HomeScreen() {
             const connected = await connectSpotifyAccount();
 
             if (connected) {
+                setSpotifyConnected(true);
                 Alert.alert("Success", "Spotify account connected!");
                 setStage("tester");
             }
@@ -296,6 +350,10 @@ export default function HomeScreen() {
                 <Text style={styles.logoutText}>Log out</Text>
                 </TouchableOpacity>
             </View>
+        )}
+
+        {user && (
+            <SpotifyDevices connected={spotifyConnected} />
         )}
 
         <View style={styles.progress}>
