@@ -13,6 +13,7 @@ import { saveSession, apiFetch, clearSession, getStoredRefreshToken } from '@/li
 import { useSpotifyAuth } from '@/lib/spotifyAuth';
 import * as WebBrowser from 'expo-web-browser';
 import SpotifyDevices from '@/components/SpotifyDevices';
+import SpotifyPlayback from '@/components/SpotifyPlayback';
 
 type Stage = 'google' | 'spotify' | 'tester';
 
@@ -354,6 +355,10 @@ export default function HomeScreen() {
 
         {user && (
             <SpotifyDevices connected={spotifyConnected} />
+        )}
+
+        {user && (
+            <SpotifyPlayback connected={spotifyConnected} />
         )}
 
         <View style={styles.progress}>

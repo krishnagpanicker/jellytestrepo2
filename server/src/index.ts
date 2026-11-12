@@ -414,7 +414,7 @@ app.get('/spotify/devices', requireAuth, async (req, res) => {
                 is_restricted: boolean;
                 volume_percent: number | null;
             }>;
-        }
+        };
 
         console.log('Devices:', data.devices);
 
@@ -427,6 +427,352 @@ app.get('/spotify/devices', requireAuth, async (req, res) => {
         }
 
         return res.status(500).json({ error: 'Unable to retrieve Spotify devices.' });
+    }
+});
+
+app.put('/spotify/transfer', requireAuth, async (req, res) => {
+    const userId = req.user!.id;
+    const { deviceId } = req.body ?? {};
+
+    if (typeof deviceId !== 'string' || !deviceId.trim()) {
+        return res.status(400).json({ error: 'A valid Spotify device ID is required.' });
+    }
+
+    try {
+        const spotifyAccessToken = await getSpotifyAccessToken(userId);
+        const devicesResponse = await fetch('https://api.spotify.com/v1/me/player/devices', {
+            headers: {
+                Authorization: `Bearer ${spotifyAccessToken}`,
+            },
+        });
+
+        if (!devicesResponse.ok) {
+            return res.status(502).json({ error: 'Unable to verify available Spotify devices.', spotifyStatus: devicesResponse.status });
+        }
+
+        const { devices } = await devicesResponse.json() as {
+            devices: {
+                id: string | null;
+                is_active: boolean;
+                is_restricted: boolean;
+            }[];
+        };
+
+        const targetDevice = devices.find(
+            (device) => device.id === deviceId
+        );
+
+        if (!targetDevice) {
+            return res.status(404).json({
+                error: 'Spotify device is no longer available. Refresh the list.',
+            });
+        }
+
+        if (targetDevice.is_restricted) {
+            return res.status(403).json({
+                error: 'This Spotify device cannot be controlled through the API.',
+            });
+        }
+
+        if (targetDevice.is_active) {
+            return res.status(200).json({
+                transferred: true,
+                alreadyActive: true,
+            });
+        }
+
+        const response = await fetch('https://api.spotify.com/v1/me/player', {
+            method: 'PUT',
+            headers: {
+                Authorization: `Bearer ${spotifyAccessToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                device_ids: [deviceId],
+                play: false,
+            }),
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Spotify transfer error:', response.status, errorText);
+
+            return res.status(response.status).json({
+                error: 'Spotify could not transfer playback.',
+                spotifyStatus: response.status,
+            });
+        }
+
+        return res.status(200).json({
+            transferred: true,
+            deviceId,
+        });
+    } catch (error) {
+        console.error('Spotify transfer failed:', error);
+        if (error instanceof Error && error.message === 'SPOTIFY_NOT_CONNECTED') {
+            return res.status(409).json({
+                error: 'Spotify is not connected.',
+            });
+        }
+
+        return res.status(500).json({
+            error: 'Unable to transfer Spotify playback.',
+        });
+    }
+})
+
+
+/*
+ * GET /spotify/playback
+ *
+ * Returns the user's current playback information.
+ */
+app.get("/spotify/playback", requireAuth, async (req, res) => {
+    try {
+        const accessToken = await getSpotifyAccessToken(req.user!.id);
+
+        const response = await fetch(
+            "https://api.spotify.com/v1/me/player",
+            {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                },
+            }
+        );
+
+        // Spotify returns 204 when playback state is unavailable.
+        if (response.status === 204) {
+            return res.status(200).json({
+                available: false,
+                playback: null,
+            });
+        }
+
+        if (!response.ok) {
+            const details = await response.text();
+            console.error("Spotify playback GET:", response.status, details);
+
+            return res.status(response.status).json({
+                error: "Could not retrieve Spotify playback.",
+            });
+        }
+
+        const data = await response.json();
+
+        return res.status(200).json({
+            available: true,
+            playback: data,
+        });
+    } catch (error) {
+        console.error("Playback retrieval failed:", error);
+
+        return res.status(500).json({
+            error: "Unable to retrieve playback.",
+        });
+    }
+});
+
+
+/*
+ * Shared helper for playback modification endpoints.
+ *
+ * This sends a request to Spotify and converts the
+ * resulting HTTP status into a Jelly API response.
+ */
+async function sendSpotifyPlaybackCommand(
+    userId: string,
+    path: string,
+    method: "PUT" | "POST",
+    body?: object
+): Promise<{ status: number; error?: string }> {
+    const accessToken = await getSpotifyAccessToken(userId);
+
+    const response = await fetch(
+        `https://api.spotify.com/v1${path}`,
+        {
+            method,
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                ...(body ? { "Content-Type": "application/json" } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+        }
+    );
+
+    if (!response.ok) {
+        const details = await response.text();
+
+        console.error(
+            "Spotify playback command failed:",
+            response.status,
+            details
+        );
+
+        return {
+            status: response.status,
+            error: "Spotify rejected the playback command.",
+        };
+    }
+
+    return { status: response.status };
+}
+
+
+/*
+ * PUT /spotify/playback/play
+ *
+ * Resumes the current Spotify playback.
+ * Does not start a specific track if no context exists.
+ */
+app.put("/spotify/playback/play", requireAuth, async (req, res) => {
+    try {
+        const result = await sendSpotifyPlaybackCommand(
+            req.user!.id,
+            "/me/player/play",
+            "PUT"
+        );
+
+        if (result.error) {
+            return res.status(result.status).json({
+                error: result.error,
+            });
+        }
+
+        return res.status(200).json({ success: true });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            error: "Unable to resume Spotify playback.",
+        });
+    }
+});
+
+
+/*
+ * PUT /spotify/playback/pause
+ */
+app.put("/spotify/playback/pause", requireAuth, async (req, res) => {
+    try {
+        const result = await sendSpotifyPlaybackCommand(
+            req.user!.id,
+            "/me/player/pause",
+            "PUT"
+        );
+
+        if (result.error) {
+            return res.status(result.status).json({
+                error: result.error,
+            });
+        }
+
+        return res.status(200).json({ success: true });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            error: "Unable to pause Spotify playback.",
+        });
+    }
+});
+
+
+/*
+ * POST /spotify/playback/next
+ */
+app.post("/spotify/playback/next", requireAuth, async (req, res) => {
+    try {
+        const result = await sendSpotifyPlaybackCommand(
+            req.user!.id,
+            "/me/player/next",
+            "POST"
+        );
+
+        if (result.error) {
+            return res.status(result.status).json({
+                error: result.error,
+            });
+        }
+
+        return res.status(200).json({ success: true });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            error: "Unable to skip to next track.",
+        });
+    }
+});
+
+
+/*
+ * POST /spotify/playback/previous
+ */
+app.post("/spotify/playback/previous", requireAuth, async (req, res) => {
+    try {
+        const result = await sendSpotifyPlaybackCommand(
+            req.user!.id,
+            "/me/player/previous",
+            "POST"
+        );
+
+        if (result.error) {
+            return res.status(result.status).json({
+                error: result.error,
+            });
+        }
+
+        return res.status(200).json({ success: true });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            error: "Unable to skip to previous track.",
+        });
+    }
+});
+
+
+/*
+ * PUT /spotify/playback/seek
+ *
+ * Request body:
+ * {
+ *     "positionMs": 60000
+ * }
+ */
+app.put("/spotify/playback/seek", requireAuth, async (req, res) => {
+    const { positionMs } = req.body ?? {};
+
+    if (
+        typeof positionMs !== "number" ||
+        !Number.isSafeInteger(positionMs) ||
+        positionMs < 0
+    ) {
+        return res.status(400).json({
+            error: "positionMs must be a non-negative integer.",
+        });
+    }
+
+    try {
+        const params = new URLSearchParams({
+            position_ms: String(positionMs),
+        });
+
+        const result = await sendSpotifyPlaybackCommand(
+            req.user!.id,
+            `/me/player/seek?${params.toString()}`,
+            "PUT"
+        );
+
+        if (result.error) {
+            return res.status(result.status).json({
+                error: result.error,
+            });
+        }
+
+        return res.status(200).json({ success: true });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            error: "Unable to seek Spotify playback.",
+        });
     }
 });
 

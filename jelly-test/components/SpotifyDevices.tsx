@@ -28,6 +28,7 @@ export default function SpotifyDevices({ connected }: Props) {
     const [devices, setDevices] = useState<SpotifyDevice[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [transferringId, setTransferringId] = useState<string | null>(null);
 
     const refreshDevices = useCallback(async () => {
         if (!connected) return;
@@ -54,6 +55,54 @@ export default function SpotifyDevices({ connected }: Props) {
             setLoading(false);
         }
     }, [connected]);
+
+
+    async function transferPlayback(device: SpotifyDevice) {
+        if (!device.id || device.is_restricted || device.is_active) {
+            return;
+        }
+
+        if (transferringId !== null) {
+            return;
+        }
+
+        setTransferringId(device.id);
+        setError(null);
+
+        try {
+            const response = await apiFetch("/spotify/transfer", {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    deviceId: device.id,
+                }),
+            });
+
+            if (!response.ok) {
+                const data = await response.json().catch(() => null);
+
+                throw new Error(
+                    data?.error ??
+                    `Spotify transfer failed (${response.status})`
+                );
+            }
+
+            // Spotify accepted the request.
+            // Refresh to obtain the actual active device state.
+            await refreshDevices();
+
+        } catch (error) {
+            setError(
+                error instanceof Error
+                    ? error.message
+                    : "Unable to transfer playback."
+            );
+        } finally {
+            setTransferringId(null);
+        }
+    }
 
     useEffect(() => {
         if (connected) {
@@ -126,19 +175,32 @@ export default function SpotifyDevices({ connected }: Props) {
                     showsHorizontalScrollIndicator={false}
                     contentContainerStyle={styles.deviceList}
                 >
-                    {devices.map((device, index) => (
-                        <View
+                    
+                {devices.map((device, index) => {
+                    const isTransferring = transferringId === device.id;
+                    const canTransfer =
+                        !!device.id &&
+                        !device.is_restricted &&
+                        !device.is_active &&
+                        transferringId === null;
+
+                    return (
+                        <TouchableOpacity
                             key={`${device.id ?? device.name}-${index}`}
                             style={[
                                 styles.deviceCard,
                                 device.is_active && styles.activeCard,
+                                device.is_restricted && styles.restrictedCard,
                             ]}
+                            onPress={() => transferPlayback(device)}
+                            disabled={!canTransfer || loading}
+                            activeOpacity={0.7}
                         >
                             <Text style={styles.deviceIcon}>
-                                {device.type === "Computer" ? "💻" :
-                                 device.type === "Smartphone" ? "📱" :
-                                 device.type === "Speaker" ? "🔊" :
-                                 "🎵"}
+                                {device.type.toLowerCase() === "computer" ? "💻" :
+                                device.type.toLowerCase() === "smartphone" ? "📱" :
+                                device.type.toLowerCase() === "speaker" ? "🔊" :
+                                "🎵"}
                             </Text>
 
                             <Text
@@ -152,18 +214,22 @@ export default function SpotifyDevices({ connected }: Props) {
                                 {device.type}
                             </Text>
 
-                            <Text
-                                style={[
-                                    styles.deviceStatus,
-                                    device.is_active && styles.activeStatus,
-                                ]}
-                            >
-                                {device.is_restricted
-                                    ? "Restricted"
-                                    : device.is_active
-                                      ? "● Active"
-                                      : "Available"}
-                            </Text>
+                            {isTransferring ? (
+                                <ActivityIndicator color="#1DB954" />
+                            ) : (
+                                <Text
+                                    style={[
+                                        styles.deviceStatus,
+                                        device.is_active && styles.activeStatus,
+                                    ]}
+                                >
+                                    {device.is_restricted
+                                        ? "Restricted"
+                                        : device.is_active
+                                        ? "● Active"
+                                        : "Available"}
+                                </Text>
+                            )}
 
                             <Text style={styles.volume}>
                                 Volume: {
@@ -172,8 +238,34 @@ export default function SpotifyDevices({ connected }: Props) {
                                         : `${device.volume_percent}%`
                                 }
                             </Text>
-                        </View>
-                    ))}
+
+                            <View
+                                style={[
+                                    styles.transferIndicator,
+                                    device.is_active &&
+                                        styles.transferIndicatorActive,
+                                ]}
+                            >
+                                <Text
+                                    style={[
+                                        styles.transferText,
+                                        device.is_active &&
+                                            styles.transferTextActive,
+                                    ]}
+                                >
+                                    {isTransferring
+                                        ? "Transferring..."
+                                        : device.is_restricted
+                                        ? "Unavailable"
+                                        : device.is_active
+                                            ? "Currently selected"
+                                            : "Transfer here"}
+                                </Text>
+                            </View>
+                        </TouchableOpacity>
+                    );
+                })}
+
                 </ScrollView>
             )}
         </View>
@@ -274,5 +366,32 @@ const styles = StyleSheet.create({
     errorText: {
         color: "#FF8A8A",
         textAlign: "center",
+    },
+    restrictedCard: {
+        opacity: 0.5,
+    },
+
+    transferIndicator: {
+        marginTop: 8,
+        paddingVertical: 9,
+        paddingHorizontal: 6,
+        borderRadius: 8,
+        backgroundColor: "#303747",
+        alignItems: "center",
+    },
+
+    transferIndicatorActive: {
+        backgroundColor: "#163D2B",
+    },
+
+    transferText: {
+        color: "#FFFFFF",
+        fontSize: 11,
+        fontWeight: "600",
+        textAlign: "center",
+    },
+
+    transferTextActive: {
+        color: "#65DDA1",
     },
 });
